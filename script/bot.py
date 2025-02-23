@@ -13,7 +13,7 @@ class DexScreenerBot:
         
         self.conn = sqlite3.connect(self.config["db_name"])
         self.create_tables()
-        self.patterns = {"rugged": [], "pumped": [], "new_pairs": [], "fake_volume": []}
+        self.patterns = {"rugged": [], "pumped": [], "new_pairs": [], "fake_volume": [], "bundled": []}
 
     def create_tables(self):
         """创建数据库表"""
@@ -52,28 +52,29 @@ class DexScreenerBot:
             print(f"DexScreener API 请求失败: {e}")
             return []
 
-    def fetch_pocker_universe_data(self, pair_address: str, volume: float, liquidity: float) -> bool:
-        """模拟调用 Pocker Universe API 检测虚假交易量"""
-        url = self.config["pocker_universe_api"]
-        payload = {
-            "pair_address": pair_address,
-            "volume_24h": volume,
-            "liquidity_usd": liquidity
-        }
+    def fetch_rugcheck_report(self, token_address: str) -> Dict:
+        """从 RugCheck API 获取报告"""
+        url = f"{self.config['rugcheck_api']}/{token_address}/report"
         try:
-            # 模拟 API 调用
-            # response = requests.post(url, json=payload)
-            # result = response.json().get("is_fake", False)
-            
-            # 模拟逻辑：如果交易量/流动性比例过高且交易次数不足，认为是虚假
-            fake_pattern = self.config["patterns"]["fake_volume"]
-            transaction_count = 100  # 假设从其他数据源获取，简化模拟
-            ratio = volume / liquidity if liquidity > 0 else float('inf')
-            result = ratio > fake_pattern["volume_liquidity_ratio"] and transaction_count < fake_pattern["min_transactions"]
-            return result
-        except Exception as e:
-            print(f"Pocker Universe API 请求失败: {e}")
-            return False
+            response = requests.get(url)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            print(f"RugCheck API 请求失败: {e}")
+            return {}
+
+    def check_bundled_supply(self, pair: Dict) -> bool:
+        """检查是否为捆绑供应（简单模拟）"""
+        # 假设捆绑供应表现为单一钱包持有超过 50% 的代币
+        # 在实际中需要更复杂的数据分析，这里简化处理
+        holders = pair.get("holders", [])  # DexScreener 未直接提供，可能需要额外 API
+        if not holders:
+            return False  # 无数据，跳过检测
+        total_supply = sum(h["amount"] for h in holders)
+        for holder in holders:
+            if holder["amount"] / total_supply > 0.5:
+                return True
+        return False
 
     def apply_filters(self, pair: Dict) -> bool:
         """应用过滤器和黑名单"""
@@ -84,7 +85,8 @@ class DexScreenerBot:
         dev_address = pair.get("maker", {}).get("address", "")
         if (symbol in blacklists["tokens"] or 
             dev_address in blacklists["developers"] or 
-            symbol in blacklists["fake_volume_tokens"]):
+            symbol in blacklists["fake_volume_tokens"] or 
+            symbol in blacklists["bundled_tokens"]):
             return False
 
         liquidity = pair.get("liquidity", {}).get("usd", 0)
@@ -114,7 +116,19 @@ class DexScreenerBot:
             "last_updated": datetime.now()
         }
 
-        # 检查虚假交易量
+        # RugCheck 检查
+        rugcheck_report = self.fetch_rugcheck_report(pair["pairAddress"])
+        if rugcheck_report.get("status") != "GOOD":
+            analysis["type"] = "unsafe"
+            return analysis
+
+        # 检查捆绑供应
+        if self.check_bundled_supply(pair):
+            analysis["type"] = "bundled"
+            self.config["blacklists"]["bundled_tokens"].append(analysis["symbol"])
+            return analysis
+
+        # Pocker Universe 检查虚假交易量
         if self.fetch_pocker_universe_data(analysis["pair_address"], volume_24h, liquidity):
             analysis["type"] = "fake_volume"
             self.config["blacklists"]["fake_volume_tokens"].append(analysis["symbol"])
@@ -123,8 +137,14 @@ class DexScreenerBot:
         
         return analysis
 
+    def fetch_pocker_universe_data(self, pair_address: str, volume: float, liquidity: float) -> bool:
+        """模拟 Pocker Universe API"""
+        fake_pattern = self.config["patterns"]["fake_volume"]
+        ratio = volume / liquidity if liquidity > 0 else float('inf')
+        return ratio > fake_pattern["volume_liquidity_ratio"] and 100 < fake_pattern["min_transactions"]
+
     def detect_patterns(self, analysis: Dict) -> str:
-        """检测模式：rugged, pumped 或 new_pair"""
+        """检测模式"""
         patterns = self.config["patterns"]
         liquidity = analysis["liquidity_usd"]
         volume = analysis["volume_24h"]
@@ -141,7 +161,7 @@ class DexScreenerBot:
         return "normal"
 
     def save_analysis(self, analysis: Dict):
-        """保存分析结果到数据库"""
+        """保存分析结果"""
         cursor = self.conn.cursor()
         
         cursor.execute('''
@@ -182,7 +202,6 @@ class DexScreenerBot:
             for pattern, tokens in self.patterns.items():
                 print(f"{pattern}: {len(tokens)} 个 - {tokens[-5:]}")
             
-            # 保存更新后的黑名单到 config 文件
             with open("config.json", "w") as f:
                 json.dump(self.config, f, indent=4)
             
