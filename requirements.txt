@@ -1,0 +1,2 @@
+requests>=2.31.0     # 用于进行 HTTP 请求以访问 DexScreener API
+pandas>=2.0.0        # 用于数据分析（可选，但为未来扩展预留）

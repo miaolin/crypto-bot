@@ -1,0 +1,43 @@
+{
+    "api_url": "https://api.dexscreener.com/latest/dex",
+    "rugcheck_api": "https://api.rugcheck.xyz/v1/tokens",
+    "pocker_universe_api": "https://api.pockeruniverse.com/v1/fake-volume-detection",
+    "telegram_bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+    "telegram_chat_id": "YOUR_CHAT_ID",
+    "trojan_api": "https://api.trojan.trade/v1",
+    "db_name": "dexscreener_data.db",
+    "check_interval": 300,
+    "filters": {
+        "min_liquidity_usd": 10000,
+        "max_age_hours": 720,
+        "min_volume_24h": 5000
+    },
+    "blacklists": {
+        "tokens": ["SHITCOIN", "SCAMTOKEN"],
+        "developers": ["0x1234567890abcdef1234567890abcdef12345678"],
+        "fake_volume_tokens": [],
+        "bundled_tokens": []
+    },
+    "patterns": {
+        "rugged": {
+            "liquidity_threshold": 0.1,
+            "volume_multiplier": 10
+        },
+        "pumped": {
+            "volume_multiplier": 50,
+            "max_age_hours": 24
+        },
+        "new_pair": {
+            "max_age_hours": 1
+        },
+        "fake_volume": {
+            "volume_liquidity_ratio": 100,
+            "min_transactions": 50
+        }
+    },
+    "trading": {
+        "buy_threshold": 0.05,  
+        "sell_threshold": 0.10,
+        "amount_usd": 100       
+    }
+}
