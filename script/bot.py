@@ -14,6 +14,7 @@ class DexScreenerBot:
         self.conn = sqlite3.connect(self.config["db_name"])
         self.create_tables()
         self.patterns = {"rugged": [], "pumped": [], "new_pairs": [], "fake_volume": [], "bundled": []}
+        self.price_history = {}  # 存储价格历史以检测变化
 
     def create_tables(self):
         """创建数据库表"""
@@ -39,7 +40,30 @@ class DexScreenerBot:
                 FOREIGN KEY (pair_address) REFERENCES tokens (pair_address)
             )
         ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trades (
+                pair_address TEXT,
+                action TEXT,
+                amount_usd REAL,
+                price_usd REAL,
+                timestamp TIMESTAMP,
+                FOREIGN KEY (pair_address) REFERENCES tokens (pair_address)
+            )
+        ''')
         self.conn.commit()
+
+    def send_telegram_message(self, message: str):
+        """发送 Telegram 通知"""
+        url = f"https://api.telegram.org/bot{self.config['telegram_bot_token']}/sendMessage"
+        payload = {
+            "chat_id": self.config["telegram_chat_id"],
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        try:
+            requests.post(url, json=payload)
+        except requests.RequestException as e:
+            print(f"发送 Telegram 消息失败: {e}")
 
     def fetch_dex_data(self, chain: str = "ethereum") -> List[Dict]:
         """从 DexScreener API 获取数据"""
@@ -63,18 +87,48 @@ class DexScreenerBot:
             print(f"RugCheck API 请求失败: {e}")
             return {}
 
+    def fetch_pocker_universe_data(self, pair_address: str, volume: float, liquidity: float) -> bool:
+        """模拟 Pocker Universe API"""
+        fake_pattern = self.config["patterns"]["fake_volume"]
+        ratio = volume / liquidity if liquidity > 0 else float('inf')
+        return ratio > fake_pattern["volume_liquidity_ratio"] and 100 < fake_pattern["min_transactions"]
+
     def check_bundled_supply(self, pair: Dict) -> bool:
-        """检查是否为捆绑供应（简单模拟）"""
-        # 假设捆绑供应表现为单一钱包持有超过 50% 的代币
-        # 在实际中需要更复杂的数据分析，这里简化处理
-        holders = pair.get("holders", [])  # DexScreener 未直接提供，可能需要额外 API
+        """检查是否为捆绑供应（模拟）"""
+        holders = pair.get("holders", [])  # 需要额外数据源
         if not holders:
-            return False  # 无数据，跳过检测
+            return False
         total_supply = sum(h["amount"] for h in holders)
         for holder in holders:
             if holder["amount"] / total_supply > 0.5:
                 return True
         return False
+
+    def execute_trade(self, pair_address: str, symbol: str, action: str, price_usd: float):
+        """通过 Trojan 执行交易（模拟）"""
+        url = f"{self.config['trojan_api']}/trade"
+        payload = {
+            "pair_address": pair_address,
+            "action": action,
+            "amount_usd": self.config["trading"]["amount_usd"],
+            "price_usd": price_usd
+        }
+        try:
+            # 模拟 Trojan API 调用
+            # response = requests.post(url, json=payload)
+            # response.raise_for_status()
+            message = f"*{action.upper()}* {symbol}: ${self.config['trading']['amount_usd']} at ${price_usd}"
+            self.send_telegram_message(message)
+            
+            # 记录交易
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                INSERT INTO trades (pair_address, action, amount_usd, price_usd, timestamp)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (pair_address, action, self.config["trading"]["amount_usd"], price_usd, datetime.now()))
+            self.conn.commit()
+        except requests.RequestException as e:
+            print(f"Trojan 交易失败: {e}")
 
     def apply_filters(self, pair: Dict) -> bool:
         """应用过滤器和黑名单"""
@@ -132,16 +186,16 @@ class DexScreenerBot:
         if self.fetch_pocker_universe_data(analysis["pair_address"], volume_24h, liquidity):
             analysis["type"] = "fake_volume"
             self.config["blacklists"]["fake_volume_tokens"].append(analysis["symbol"])
-        else:
-            analysis["type"] = self.detect_patterns(analysis)
-        
-        return analysis
+            return analysis
 
-    def fetch_pocker_universe_data(self, pair_address: str, volume: float, liquidity: float) -> bool:
-        """模拟 Pocker Universe API"""
-        fake_pattern = self.config["patterns"]["fake_volume"]
-        ratio = volume / liquidity if liquidity > 0 else float('inf')
-        return ratio > fake_pattern["volume_liquidity_ratio"] and 100 < fake_pattern["min_transactions"]
+        # 常规模式检测
+        analysis["type"] = self.detect_patterns(analysis)
+
+        # 交易逻辑
+        if analysis["type"] in ["new_pair", "pumped"]:  # 只对新对或被泵的代币交易
+            self.handle_trading(analysis)
+
+        return analysis
 
     def detect_patterns(self, analysis: Dict) -> str:
         """检测模式"""
@@ -159,6 +213,28 @@ class DexScreenerBot:
         elif age_hours < patterns["new_pair"]["max_age_hours"]:
             return "new_pair"
         return "normal"
+
+    def handle_trading(self, analysis: Dict):
+        """处理交易逻辑"""
+        pair_address = analysis["pair_address"]
+        symbol = analysis["symbol"]
+        current_price = analysis["price_usd"]
+
+        # 获取历史价格
+        if pair_address not in self.price_history:
+            self.price_history[pair_address] = []
+        previous_price = self.price_history[pair_address][-1] if self.price_history[pair_address] else current_price
+        self.price_history[pair_address].append(current_price)
+
+        # 计算价格变化
+        price_change = (current_price - previous_price) / previous_price if previous_price else 0
+
+        # 买入/卖出逻辑
+        trading_config = self.config["trading"]
+        if price_change >= trading_config["buy_threshold"]:
+            self.execute_trade(pair_address, symbol, "buy", current_price)
+        elif price_change <= -trading_config["sell_threshold"]:
+            self.execute_trade(pair_address, symbol, "sell", current_price)
 
     def save_analysis(self, analysis: Dict):
         """保存分析结果"""
@@ -189,6 +265,7 @@ class DexScreenerBot:
     def run(self):
         """运行机器人"""
         print("机器人启动...")
+        self.send_telegram_message("DexScreener 机器人已启动！")
         while True:
             pairs = self.fetch_dex_data()
             for pair in pairs:
@@ -210,6 +287,7 @@ class DexScreenerBot:
     def __del__(self):
         """关闭数据库连接"""
         self.conn.close()
+        self.send_telegram_message("DexScreener 机器人已停止。")
 
 if __name__ == "__main__":
     bot = DexScreenerBot()
